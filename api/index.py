@@ -11,6 +11,8 @@ app.secret_key = os.environ.get('SECRET_KEY', 'your_secret_key_change_in_product
 
 def get_db_connection():
     DATABASE_URL = os.environ.get('DATABASE_URL', '')
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable is not set. Please add it in Vercel.")
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
@@ -79,29 +81,33 @@ def login():
         flash('All fields are required')
         return redirect('/')
 
-    conn = get_db_connection()
-    cursor = dict_cursor(conn)
-    cursor.execute("SELECT * FROM Admins WHERE Username = %s AND PasswordHash = %s", (email, password))
-    user = cursor.fetchone()
+    try:
+        conn = get_db_connection()
+        cursor = dict_cursor(conn)
+        cursor.execute("SELECT * FROM Admins WHERE Username = %s AND PasswordHash = %s", (email, password))
+        user = cursor.fetchone()
 
-    if user:
-        session['logged_in'] = True
-        session['email'] = email
-        session['role'] = user['role']
+        if user:
+            session['logged_in'] = True
+            session['email'] = email
+            session['role'] = user['role']
 
-        if user['role'] == 'admin':
-            cursor.close()
-            conn.close()
-            return redirect(url_for('admin'))
-        elif user['role'] == 'teacher':
-            cursor.close()
-            conn.close()
-            return redirect(url_for('teacher'))
-    else:
-        flash('Invalid login, please try again')
+            if user['role'] == 'admin':
+                cursor.close()
+                conn.close()
+                return redirect(url_for('admin'))
+            elif user['role'] == 'teacher':
+                cursor.close()
+                conn.close()
+                return redirect(url_for('teacher'))
+        else:
+            flash('Invalid login, please try again')
 
-    cursor.close()
-    conn.close()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        flash(f'Database Connection Error: {str(e)}. Please check if your Supabase database is connected and tables are created.')
+
     return redirect('/')
 
 @app.route('/admin')
