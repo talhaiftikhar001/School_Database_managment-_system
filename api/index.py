@@ -1,6 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
-import psycopg2
-import psycopg2.extras
+import sqlite3
 from datetime import datetime, date
 import os
 
@@ -10,14 +9,31 @@ app.secret_key = os.environ.get('SECRET_KEY', 'your_secret_key_change_in_product
 ############################### connection #################################
 
 def get_db_connection():
-    DATABASE_URL = os.environ.get('DATABASE_URL', '')
-    if not DATABASE_URL:
-        raise Exception("DATABASE_URL environment variable is not set. Please add it in Vercel.")
-    conn = psycopg2.connect(DATABASE_URL)
+    # Use /tmp for Vercel serverless environment
+    db_path = '/tmp/school.db'
+    is_new = not os.path.exists(db_path)
+    
+    # In local environment, use local path if not on Vercel
+    if not os.environ.get('VERCEL'):
+        db_path = 'school.db'
+        is_new = not os.path.exists(db_path)
+        
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    
+    if is_new:
+        try:
+            # Look for schema file in the root directory
+            schema_path = os.path.join(os.path.dirname(__file__), '../db_schema_sqlite.sql')
+            if not os.path.exists(schema_path):
+                schema_path = 'db_schema_sqlite.sql' # fallback
+            with open(schema_path, 'r') as schema_file:
+                conn.executescript(schema_file.read())
+        except Exception as e:
+            print("Could not initialize DB:", e)
+            
     return conn
 
-def dict_cursor(conn):
-    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 ################################# start ##########################################
 
@@ -46,8 +62,8 @@ def signup():
         return redirect('/')
 
     conn = get_db_connection()
-    cursor = dict_cursor(conn)
-    cursor.execute("SELECT * FROM Admins WHERE Username = %s", (email,))
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Admins WHERE Username = ?", (email,))
     existing_user = cursor.fetchone()
 
     if existing_user:
@@ -58,7 +74,7 @@ def signup():
 
     try:
         cursor.execute(
-            "INSERT INTO Admins (Username, PasswordHash, Role) VALUES (%s, %s, %s)",
+            "INSERT INTO Admins (Username, PasswordHash, Role) VALUES (?, ?, ?)",
             (email, password, role)
         )
         conn.commit()
@@ -83,8 +99,8 @@ def login():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
-        cursor.execute("SELECT * FROM Admins WHERE Username = %s AND PasswordHash = %s", (email, password))
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM Admins WHERE Username = ? AND PasswordHash = ?", (email, password))
         user = cursor.fetchone()
 
         if user:
@@ -133,9 +149,9 @@ def get_teacher_classes():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = %s", (session.get('email'),))
+        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = ?", (session.get('email'),))
         teacher_row = cursor.fetchone()
 
         if not teacher_row:
@@ -147,7 +163,7 @@ def get_teacher_classes():
             SELECT DISTINCT c.ClassID, c.ClassName 
             FROM Classes c
             JOIN TeacherAssignments ta ON c.ClassID = ta.ClassID
-            WHERE ta.TeacherID = %s
+            WHERE ta.TeacherID = ?
         """, (teacher_id,))
 
         classes = []
@@ -172,12 +188,12 @@ def get_sections(class_id):
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT s.SectionID, s.SectionName 
             FROM Sections s
-            WHERE s.ClassID = %s
+            WHERE s.ClassID = ?
         """, (class_id,))
 
         sections = []
@@ -202,12 +218,12 @@ def get_teacher_stats():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT t.Name AS fullname, t.TeacherID
             FROM Teachers t 
-            WHERE t.Email = %s
+            WHERE t.Email = ?
         """, (session.get('email'),))
 
         teacher_row = cursor.fetchone()
@@ -227,14 +243,14 @@ def get_teacher_stats():
         cursor.execute("""
             SELECT COUNT(DISTINCT ClassID) AS classcount
             FROM TeacherAssignments
-            WHERE TeacherID = %s
+            WHERE TeacherID = ?
         """, (teacher_id,))
         class_count = cursor.fetchone()['classcount']
 
         cursor.execute("""
             SELECT COUNT(DISTINCT SubjectID) AS subjectcount
             FROM TeacherAssignments
-            WHERE TeacherID = %s
+            WHERE TeacherID = ?
         """, (teacher_id,))
         subject_count = cursor.fetchone()['subjectcount']
 
@@ -243,7 +259,7 @@ def get_teacher_stats():
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN TeacherAssignments ta ON e.ClassID = ta.ClassID AND e.SectionID = ta.SectionID
-            WHERE ta.TeacherID = %s
+            WHERE ta.TeacherID = ?
         """, (teacher_id,))
         student_count = cursor.fetchone()['studentcount']
 
@@ -256,7 +272,7 @@ def get_teacher_stats():
             JOIN Students s ON a.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN TeacherAssignments ta ON e.ClassID = ta.ClassID AND e.SectionID = ta.SectionID
-            WHERE ta.TeacherID = %s AND a.Date = %s
+            WHERE ta.TeacherID = ? AND a.Date = ?
         """, (teacher_id, today))
 
         attendance_row = cursor.fetchone()
@@ -283,9 +299,9 @@ def get_recent_activities():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = %s", (session.get('email'),))
+        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = ?", (session.get('email'),))
         teacher_row = cursor.fetchone()
 
         if not teacher_row:
@@ -295,14 +311,14 @@ def get_recent_activities():
 
         cursor.execute("""
             SELECT 
-                TO_CHAR(a.ActivityDate, 'DD/MM/YYYY') AS date,
+                strftime('%d/%m/%Y', a.ActivityDate) AS date,
                 a.ActivityType,
                 c.ClassName,
                 s.SectionName
             FROM TeacherActivities a
             JOIN Classes c ON a.ClassID = c.ClassID
             JOIN Sections s ON a.SectionID = s.SectionID
-            WHERE a.TeacherID = %s
+            WHERE a.TeacherID = ?
             ORDER BY a.ActivityDate DESC
             LIMIT 10
         """, (teacher_id,))
@@ -338,13 +354,13 @@ def view_students():
             return {'error': 'Class and section are required'}, 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT COUNT(*) AS count
             FROM TeacherAssignments
             JOIN Teachers ON TeacherAssignments.TeacherID = Teachers.TeacherID
-            WHERE Teachers.Email = %s AND TeacherAssignments.ClassID = %s AND TeacherAssignments.SectionID = %s
+            WHERE Teachers.Email = ? AND TeacherAssignments.ClassID = ? AND TeacherAssignments.SectionID = ?
         """, (session.get('email'), class_id, section_id))
 
         if cursor.fetchone()['count'] == 0:
@@ -357,13 +373,13 @@ def view_students():
                 s.StudentID, 
                 s.Name,
                 s.Gender,
-                TO_CHAR(s.DateOfBirth, 'DD/MM/YYYY') AS dateofbirth,
+                strftime('%d/%m/%Y', s.DateOfBirth) AS dateofbirth,
                 s.Contact,
                 s.Address,
-                TO_CHAR(s.AdmissionDate, 'DD/MM/YYYY') AS admissiondate
+                strftime('%d/%m/%Y', s.AdmissionDate) AS admissiondate
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s
+            WHERE e.ClassID = ? AND e.SectionID = ?
             ORDER BY s.Name
         """, (class_id, section_id))
 
@@ -401,7 +417,7 @@ def view_attendance():
             return {'error': 'Class, section, and date are required'}, 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT 
@@ -409,14 +425,14 @@ def view_attendance():
                 s.Name,
                 c.ClassName,
                 sec.SectionName,
-                TO_CHAR(a.Date, 'DD/MM/YYYY') AS date,
+                strftime('%d/%m/%Y', a.Date) AS date,
                 a.Status
             FROM Attendance a
             JOIN Students s ON a.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN Classes c ON e.ClassID = c.ClassID
             JOIN Sections sec ON e.SectionID = sec.SectionID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND a.Date = %s
+            WHERE e.ClassID = ? AND e.SectionID = ? AND a.Date = ?
             ORDER BY s.Name
         """, (class_id, section_id, att_date))
 
@@ -490,9 +506,9 @@ def get_teacher_subjects():
             return {'error': 'Class and section are required'}, 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = %s", (session.get('email'),))
+        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = ?", (session.get('email'),))
         teacher_row = cursor.fetchone()
 
         if not teacher_row:
@@ -506,7 +522,7 @@ def get_teacher_subjects():
             SELECT DISTINCT s.SubjectID, s.SubjectName
             FROM Subjects s
             JOIN TeacherAssignments ta ON s.SubjectID = ta.SubjectID
-            WHERE ta.TeacherID = %s AND ta.ClassID = %s AND ta.SectionID = %s
+            WHERE ta.TeacherID = ? AND ta.ClassID = ? AND ta.SectionID = ?
         """, (teacher_id, class_id, section_id))
 
         subjects = []
@@ -536,13 +552,13 @@ def get_class_section_details():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT c.ClassName, s.SectionName
             FROM Classes c
             JOIN Sections s ON c.ClassID = s.ClassID
-            WHERE c.ClassID = %s AND s.SectionID = %s
+            WHERE c.ClassID = ? AND s.SectionID = ?
         """, (class_id, section_id))
 
         row = cursor.fetchone()
@@ -571,14 +587,14 @@ def get_students_for_attendance():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT a.StudentID, a.Status
             FROM Attendance a
             JOIN Students s ON a.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND a.Date = %s
+            WHERE e.ClassID = ? AND e.SectionID = ? AND a.Date = ?
         """, (class_id, section_id, att_date))
 
         existing_attendance = cursor.fetchall()
@@ -588,7 +604,7 @@ def get_students_for_attendance():
             SELECT s.StudentID, s.Name
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'
+            WHERE e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'
             ORDER BY s.Name
         """, (class_id, section_id))
 
@@ -631,9 +647,9 @@ def submit_attendance():
             return {'error': 'Missing required parameters'}, 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = %s", (session.get('email'),))
+        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = ?", (session.get('email'),))
         teacher_row = cursor.fetchone()
 
         if not teacher_row:
@@ -649,7 +665,7 @@ def submit_attendance():
                 FROM Attendance a
                 JOIN Students s ON a.StudentID = s.StudentID
                 JOIN Enrollments e ON s.StudentID = e.StudentID
-                WHERE e.ClassID = %s AND e.SectionID = %s AND a.Date = %s
+                WHERE e.ClassID = ? AND e.SectionID = ? AND a.Date = ?
             """, (class_id, section_id, att_date))
 
             attendance_exists = cursor.fetchone()['count'] > 0
@@ -662,18 +678,18 @@ def submit_attendance():
                 if attendance_exists:
                     cursor.execute("""
                         UPDATE Attendance
-                        SET Status = %s
-                        WHERE StudentID = %s AND Date = %s
+                        SET Status = ?
+                        WHERE StudentID = ? AND Date = ?
                     """, (status, student_id, att_date))
                 else:
                     cursor.execute("""
                         INSERT INTO Attendance (StudentID, Date, Status)
-                        VALUES (%s, %s, %s)
+                        VALUES (?, ?, ?)
                     """, (student_id, att_date, status))
 
             cursor.execute("""
                 INSERT INTO TeacherActivities (TeacherID, ClassID, SectionID, ActivityDate, ActivityType)
-                VALUES (%s, %s, %s, NOW(), %s)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
             """, (teacher_id, class_id, section_id, activity_type))
 
             conn.commit()
@@ -704,15 +720,15 @@ def get_exams_for_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT e.ExamID, s.SubjectName || ' Exam' AS examname, 
-                   TO_CHAR(e.ExamDate, 'DD/MM/YYYY') AS examdate, 
+                   strftime('%d/%m/%Y', e.ExamDate) AS examdate, 
                    e.TotalMarks
             FROM Exams e
             JOIN Subjects s ON e.SubjectID = s.SubjectID
-            WHERE s.SubjectName = %s
+            WHERE s.SubjectName = ?
             ORDER BY e.ExamDate DESC
         """, (subject,))
 
@@ -744,15 +760,15 @@ def get_students_for_grading():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         if action == 'update':
             cursor.execute("""
                 SELECT s.StudentID, s.Name, er.MarksObtained
                 FROM Students s
                 JOIN Enrollments e ON s.StudentID = e.StudentID
-                LEFT JOIN ExamResults er ON s.StudentID = er.StudentID AND er.ExamID = %s
-                WHERE e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'
+                LEFT JOIN ExamResults er ON s.StudentID = er.StudentID AND er.ExamID = ?
+                WHERE e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'
                 ORDER BY s.Name
             """, (exam_id, class_id, section_id))
         else:
@@ -761,7 +777,7 @@ def get_students_for_grading():
                 FROM ExamResults er
                 JOIN Students s ON er.StudentID = s.StudentID
                 JOIN Enrollments e ON s.StudentID = e.StudentID
-                WHERE e.ClassID = %s AND e.SectionID = %s AND er.ExamID = %s
+                WHERE e.ClassID = ? AND e.SectionID = ? AND er.ExamID = ?
             """, (class_id, section_id, exam_id))
 
             count_result = cursor.fetchone()
@@ -772,7 +788,7 @@ def get_students_for_grading():
                 SELECT s.StudentID, s.Name
                 FROM Students s
                 JOIN Enrollments e ON s.StudentID = e.StudentID
-                WHERE e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'
+                WHERE e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'
                 ORDER BY s.Name
             """, (class_id, section_id))
 
@@ -809,9 +825,9 @@ def submit_grades():
             return {'error': 'Missing required parameters'}, 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = %s", (session.get('email'),))
+        cursor.execute("SELECT TeacherID FROM Teachers WHERE Email = ?", (session.get('email'),))
         teacher_row = cursor.fetchone()
 
         if not teacher_row:
@@ -838,7 +854,7 @@ def submit_grades():
                     conn.close()
                     return {'error': f'Invalid marks for student ID {student_id}'}, 400
 
-                cursor.execute("SELECT TotalMarks FROM Exams WHERE ExamID = %s", (exam_id,))
+                cursor.execute("SELECT TotalMarks FROM Exams WHERE ExamID = ?", (exam_id,))
                 exam_row = cursor.fetchone()
                 total_marks = exam_row['totalmarks']
 
@@ -850,31 +866,31 @@ def submit_grades():
                 if action == 'update':
                     cursor.execute("""
                         SELECT COUNT(*) AS count FROM ExamResults 
-                        WHERE StudentID = %s AND ExamID = %s
+                        WHERE StudentID = ? AND ExamID = ?
                     """, (student_id, exam_id))
 
                     count_result = cursor.fetchone()
                     if count_result['count'] > 0:
                         cursor.execute("""
                             UPDATE ExamResults 
-                            SET MarksObtained = %s 
-                            WHERE StudentID = %s AND ExamID = %s
+                            SET MarksObtained = ? 
+                            WHERE StudentID = ? AND ExamID = ?
                         """, (marks, student_id, exam_id))
                     else:
                         cursor.execute("""
                             INSERT INTO ExamResults (StudentID, ExamID, MarksObtained)
-                            VALUES (%s, %s, %s)
+                            VALUES (?, ?, ?)
                         """, (student_id, exam_id, marks))
                 else:
                     cursor.execute("""
                         INSERT INTO ExamResults (StudentID, ExamID, MarksObtained)
-                        VALUES (%s, %s, %s)
+                        VALUES (?, ?, ?)
                     """, (student_id, exam_id, marks))
 
             activity_type = 'Updated Grades' if action == 'update' else 'Submitted Grades'
             cursor.execute("""
                 INSERT INTO TeacherActivities (TeacherID, ClassID, SectionID, ActivityDate, ActivityType)
-                VALUES (%s, %s, %s, NOW(), %s)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
             """, (teacher_id, class_id, section_id, activity_type))
 
             conn.commit()
@@ -956,7 +972,7 @@ def get_classes():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("SELECT ClassID, ClassName FROM Classes ORDER BY ClassName")
 
         classes = []
@@ -986,12 +1002,12 @@ def get_sections_for_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT SectionID, SectionName 
             FROM Sections 
-            WHERE ClassID = %s
+            WHERE ClassID = ?
         """, (class_id,))
 
         sections = []
@@ -1022,12 +1038,12 @@ def get_subjects():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT SubjectID, SubjectName
             FROM Subjects
-            WHERE ClassID = %s
+            WHERE ClassID = ?
             ORDER BY SubjectName
         """, (class_id,))
 
@@ -1058,12 +1074,12 @@ def get_exams():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT ExamID, ExamDate, TotalMarks
             FROM Exams
-            WHERE SubjectID = %s
+            WHERE SubjectID = ?
             ORDER BY ExamDate DESC
         """, (subject_id,))
 
@@ -1102,14 +1118,14 @@ def view_attendance_for_admin():
         attendance_date = datetime.strptime(date_str, '%Y-%m-%d').date()
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT s.StudentID, s.Name AS studentname, a.Status
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            LEFT JOIN Attendance a ON s.StudentID = a.StudentID AND a.Date = %s
-            WHERE e.ClassID = %s AND e.SectionID = %s
+            LEFT JOIN Attendance a ON s.StudentID = a.StudentID AND a.Date = ?
+            WHERE e.ClassID = ? AND e.SectionID = ?
             ORDER BY s.Name
         """, (attendance_date, class_id, section_id))
 
@@ -1146,16 +1162,16 @@ def view_grades():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT s.StudentID, s.Name AS studentname, 
                    er.MarksObtained, e.TotalMarks
             FROM Students s
             JOIN Enrollments en ON s.StudentID = en.StudentID
-            LEFT JOIN ExamResults er ON s.StudentID = er.StudentID AND er.ExamID = %s
-            JOIN Exams e ON e.ExamID = %s
-            WHERE en.ClassID = %s AND en.SectionID = %s
+            LEFT JOIN ExamResults er ON s.StudentID = er.StudentID AND er.ExamID = ?
+            JOIN Exams e ON e.ExamID = ?
+            WHERE en.ClassID = ? AND en.SectionID = ?
             ORDER BY s.Name
         """, (exam_id, exam_id, class_id, section_id))
 
@@ -1194,11 +1210,11 @@ def get_sections_for_students():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("""
             SELECT SectionID, SectionName 
             FROM Sections 
-            WHERE ClassID = %s
+            WHERE ClassID = ?
             ORDER BY SectionName
         """, (class_id,))
 
@@ -1228,7 +1244,7 @@ def get_students():
         offset = (page - 1) * per_page
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT s.StudentID, s.Name, s.Gender, s.DateOfBirth, s.Address, s.Contact,
@@ -1244,22 +1260,22 @@ def get_students():
         params = []
 
         if class_id:
-            query += " AND e.ClassID = %s"
+            query += " AND e.ClassID = ?"
             params.append(class_id)
 
         if section_id:
-            query += " AND e.SectionID = %s"
+            query += " AND e.SectionID = ?"
             params.append(section_id)
 
         if name:
-            query += " AND s.Name ILIKE %s"
+            query += " AND s.Name LIKE ?"
             params.append(f"%{name}%")
 
         count_query = f"SELECT COUNT(*) as total FROM ({query}) as countquery"
         cursor.execute(count_query, params)
         total = cursor.fetchone()['total']
 
-        query += " ORDER BY s.StudentID LIMIT %s OFFSET %s"
+        query += " ORDER BY s.StudentID LIMIT ? OFFSET ?"
         params.extend([per_page, offset])
 
         cursor.execute(query, params)
@@ -1307,12 +1323,12 @@ def add_student():
                 return jsonify({"error": f"Field '{field}' is required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
             cursor.execute("""
                 INSERT INTO Guardians (Name, Relationship, Contact, Email)
-                VALUES (%s, %s, %s, %s) RETURNING GuardianID
+                VALUES (?, ?, ?, ?) RETURNING GuardianID
             """, (
                 data['guardian_name'],
                 data['relationship'],
@@ -1324,7 +1340,7 @@ def add_student():
 
             cursor.execute("""
                 INSERT INTO Students (Name, Gender, DateOfBirth, Address, Contact, GuardianID, AdmissionDate)
-                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_DATE) RETURNING StudentID
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_DATE) RETURNING StudentID
             """, (
                 data['name'],
                 data['gender'],
@@ -1360,9 +1376,9 @@ def enroll_student():
                 return jsonify({"error": f"Field '{field}' is required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM Students WHERE StudentID = %s", (data['student_id'],))
+        cursor.execute("SELECT * FROM Students WHERE StudentID = ?", (data['student_id'],))
         student = cursor.fetchone()
         if not student:
             cursor.close()
@@ -1372,7 +1388,7 @@ def enroll_student():
         cursor.execute("""
             SELECT * FROM Sections s
             JOIN Classes c ON s.ClassID = c.ClassID
-            WHERE c.ClassID = %s AND s.SectionID = %s
+            WHERE c.ClassID = ? AND s.SectionID = ?
         """, (data['class_id'], data['section_id']))
         class_section = cursor.fetchone()
         if not class_section:
@@ -1382,7 +1398,7 @@ def enroll_student():
 
         cursor.execute("""
             SELECT * FROM Enrollments
-            WHERE StudentID = %s AND ClassID = %s AND SectionID = %s AND AcademicYear = %s AND Status = 'Active'
+            WHERE StudentID = ? AND ClassID = ? AND SectionID = ? AND AcademicYear = ? AND Status = 'Active'
         """, (data['student_id'], data['class_id'], data['section_id'], data['academic_year']))
 
         existing_enrollment = cursor.fetchone()
@@ -1393,7 +1409,7 @@ def enroll_student():
 
         cursor.execute("""
             INSERT INTO Enrollments (StudentID, ClassID, SectionID, EnrollmentDate, AcademicYear, Status)
-            VALUES (%s, %s, %s, CURRENT_DATE, %s, 'Active')
+            VALUES (?, ?, ?, CURRENT_DATE, ?, 'Active')
         """, (
             data['student_id'],
             data['class_id'],
@@ -1421,7 +1437,7 @@ def get_student_details():
             return jsonify({"error": "Student ID is required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT s.StudentID, s.Name, s.Gender, s.DateOfBirth, s.Address, s.Contact,
@@ -1432,12 +1448,12 @@ def get_student_details():
             LEFT JOIN Enrollments e ON s.StudentID = e.StudentID
             LEFT JOIN Classes c ON e.ClassID = c.ClassID
             LEFT JOIN Sections sec ON e.SectionID = sec.SectionID
-            WHERE s.StudentID = %s
+            WHERE s.StudentID = ?
         """
         params = [student_id]
 
         if class_id and section_id:
-            query += " AND e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'"
+            query += " AND e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'"
             params.extend([class_id, section_id])
 
         cursor.execute(query, params)
@@ -1486,10 +1502,10 @@ def update_student():
                 return jsonify({"error": f"Field '{field}' is required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("SELECT GuardianID FROM Students WHERE StudentID = %s", (data['student_id'],))
+            cursor.execute("SELECT GuardianID FROM Students WHERE StudentID = ?", (data['student_id'],))
             student = cursor.fetchone()
             if not student:
                 conn.rollback()
@@ -1499,8 +1515,8 @@ def update_student():
 
             cursor.execute("""
                 UPDATE Guardians
-                SET Name = %s, Relationship = %s, Contact = %s, Email = %s
-                WHERE GuardianID = %s
+                SET Name = ?, Relationship = ?, Contact = ?, Email = ?
+                WHERE GuardianID = ?
             """, (
                 data['guardian_name'],
                 data['relationship'],
@@ -1511,8 +1527,8 @@ def update_student():
 
             cursor.execute("""
                 UPDATE Students
-                SET Name = %s, Gender = %s, DateOfBirth = %s, Address = %s, Contact = %s
-                WHERE StudentID = %s
+                SET Name = ?, Gender = ?, DateOfBirth = ?, Address = ?, Contact = ?
+                WHERE StudentID = ?
             """, (
                 data['name'],
                 data['gender'],
@@ -1545,10 +1561,10 @@ def remove_student():
             return jsonify({"error": "Student ID is required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("SELECT GuardianID FROM Students WHERE StudentID = %s", (student_id,))
+            cursor.execute("SELECT GuardianID FROM Students WHERE StudentID = ?", (student_id,))
             student = cursor.fetchone()
             if not student:
                 conn.rollback()
@@ -1556,12 +1572,12 @@ def remove_student():
 
             guardian_id = student['guardianid']
 
-            cursor.execute("DELETE FROM Attendance WHERE StudentID = %s", (student_id,))
-            cursor.execute("DELETE FROM ExamResults WHERE StudentID = %s", (student_id,))
-            cursor.execute("DELETE FROM Fees WHERE StudentID = %s", (student_id,))
-            cursor.execute("DELETE FROM Enrollments WHERE StudentID = %s", (student_id,))
-            cursor.execute("DELETE FROM Students WHERE StudentID = %s", (student_id,))
-            cursor.execute("DELETE FROM Guardians WHERE GuardianID = %s", (guardian_id,))
+            cursor.execute("DELETE FROM Attendance WHERE StudentID = ?", (student_id,))
+            cursor.execute("DELETE FROM ExamResults WHERE StudentID = ?", (student_id,))
+            cursor.execute("DELETE FROM Fees WHERE StudentID = ?", (student_id,))
+            cursor.execute("DELETE FROM Enrollments WHERE StudentID = ?", (student_id,))
+            cursor.execute("DELETE FROM Students WHERE StudentID = ?", (student_id,))
+            cursor.execute("DELETE FROM Guardians WHERE GuardianID = ?", (guardian_id,))
 
             conn.commit()
 
@@ -1589,22 +1605,22 @@ def get_student_roll_number():
             return jsonify({"error": "Name, Class, and Section are required"}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT s.StudentID, s.Name
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE s.Name ILIKE %s AND e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'
+            WHERE s.Name LIKE ? AND e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'
         """
         params = [f"%{name}%", class_id, section_id]
 
         if dob:
-            query += " AND s.DateOfBirth = %s"
+            query += " AND s.DateOfBirth = ?"
             params.append(dob)
 
         if contact:
-            query += " AND s.Contact = %s"
+            query += " AND s.Contact = ?"
             params.append(contact)
 
         cursor.execute(query, params)
@@ -1639,11 +1655,11 @@ def get_sections_for_teachers():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("""
             SELECT SectionID, SectionName 
             FROM Sections 
-            WHERE ClassID = %s
+            WHERE ClassID = ?
             ORDER BY SectionName
         """, (class_id,))
 
@@ -1674,11 +1690,11 @@ def get_subjects_for_teacher():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("""
             SELECT SubjectID, SubjectName 
             FROM Subjects 
-            WHERE ClassID = %s
+            WHERE ClassID = ?
             ORDER BY SubjectName
         """, (class_id,))
 
@@ -1710,7 +1726,7 @@ def get_teachers():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT t.TeacherID, t.Name, t.Gender, t.Contact, t.Email,
@@ -1727,7 +1743,7 @@ def get_teachers():
                     t.TeacherID IN (
                         SELECT TeacherID 
                         FROM TeacherAssignments 
-                        WHERE ClassID = %s AND SectionID = %s
+                        WHERE ClassID = ? AND SectionID = ?
                     )
                 """)
                 params.extend([class_id, section_id])
@@ -1736,13 +1752,13 @@ def get_teachers():
                     t.TeacherID IN (
                         SELECT TeacherID 
                         FROM TeacherAssignments 
-                        WHERE ClassID = %s
+                        WHERE ClassID = ?
                     )
                 """)
                 params.append(class_id)
 
         if name:
-            where_clauses.append("t.Name ILIKE %s")
+            where_clauses.append("t.Name LIKE ?")
             params.append(f'%{name}%')
 
         if where_clauses:
@@ -1753,7 +1769,7 @@ def get_teachers():
         total_records = cursor.fetchone()['count']
         total_pages = (total_records + per_page - 1) // per_page
 
-        query += " ORDER BY t.Name LIMIT %s OFFSET %s"
+        query += " ORDER BY t.Name LIMIT ? OFFSET ?"
         params.extend([per_page, (page - 1) * per_page])
 
         cursor.execute(query, params)
@@ -1800,9 +1816,9 @@ def add_teacher():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM Teachers WHERE Email = %s", (email,))
+        cursor.execute("SELECT COUNT(*) as cnt FROM Teachers WHERE Email = ?", (email,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
@@ -1810,7 +1826,7 @@ def add_teacher():
 
         cursor.execute("""
             INSERT INTO Teachers (Name, Gender, Contact, Email)
-            VALUES (%s, %s, %s, %s) RETURNING TeacherID
+            VALUES (?, ?, ?, ?) RETURNING TeacherID
         """, (name, gender, contact, email))
 
         teacher_id = cursor.fetchone()['teacherid']
@@ -1848,9 +1864,9 @@ def add_teacher_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM Teachers WHERE Email = %s", (email,))
+        cursor.execute("SELECT COUNT(*) as cnt FROM Teachers WHERE Email = ?", (email,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
@@ -1858,14 +1874,14 @@ def add_teacher_admin():
 
         cursor.execute("""
             INSERT INTO Teachers (Name, Gender, Contact, Email)
-            VALUES (%s, %s, %s, %s) RETURNING TeacherID
+            VALUES (?, ?, ?, ?) RETURNING TeacherID
         """, (name, gender, contact, email))
 
         teacher_id = cursor.fetchone()['teacherid']
 
         cursor.execute("""
             INSERT INTO Admins (Username, PasswordHash, Role)
-            VALUES (%s, %s, %s)
+            VALUES (?, ?, ?)
         """, (email, password, 'teacher'))
 
         conn.commit()
@@ -1892,12 +1908,12 @@ def get_teacher():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT TeacherID, Name, Gender, Contact, Email 
             FROM Teachers 
-            WHERE TeacherID = %s
+            WHERE TeacherID = ?
         """, (teacher_id,))
 
         row = cursor.fetchone()
@@ -1938,12 +1954,12 @@ def update_teacher():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT COUNT(*) as cnt
             FROM Teachers 
-            WHERE Email = %s AND TeacherID != %s
+            WHERE Email = ? AND TeacherID != ?
         """, (email, teacher_id))
 
         if cursor.fetchone()['cnt'] > 0:
@@ -1953,14 +1969,14 @@ def update_teacher():
 
         cursor.execute("""
             UPDATE Teachers 
-            SET Name = %s, Gender = %s, Contact = %s, Email = %s 
-            WHERE TeacherID = %s
+            SET Name = ?, Gender = ?, Contact = ?, Email = ? 
+            WHERE TeacherID = ?
         """, (name, gender, contact, email, teacher_id))
 
         cursor.execute("""
             UPDATE Admins 
-            SET Username = %s 
-            WHERE AdminID = %s
+            SET Username = ? 
+            WHERE AdminID = ?
         """, (email, teacher_id))
 
         conn.commit()
@@ -1982,10 +1998,10 @@ def remove_teacher():
             return jsonify({'success': False, 'message': 'Teacher ID is required'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("SELECT Email FROM Teachers WHERE TeacherID = %s", (teacher_id,))
+            cursor.execute("SELECT Email FROM Teachers WHERE TeacherID = ?", (teacher_id,))
             teacher = cursor.fetchone()
             if not teacher:
                 conn.rollback()
@@ -1993,11 +2009,11 @@ def remove_teacher():
 
             teacher_email = teacher['email']
 
-            cursor.execute("DELETE FROM Admins WHERE Username = %s", (teacher_email,))
-            cursor.execute("DELETE FROM TeacherActivities WHERE TeacherID = %s", (teacher_id,))
-            cursor.execute("DELETE FROM TeacherSubjects WHERE TeacherID = %s", (teacher_id,))
-            cursor.execute("DELETE FROM TeacherAssignments WHERE TeacherID = %s", (teacher_id,))
-            cursor.execute("DELETE FROM Teachers WHERE TeacherID = %s", (teacher_id,))
+            cursor.execute("DELETE FROM Admins WHERE Username = ?", (teacher_email,))
+            cursor.execute("DELETE FROM TeacherActivities WHERE TeacherID = ?", (teacher_id,))
+            cursor.execute("DELETE FROM TeacherSubjects WHERE TeacherID = ?", (teacher_id,))
+            cursor.execute("DELETE FROM TeacherAssignments WHERE TeacherID = ?", (teacher_id,))
+            cursor.execute("DELETE FROM Teachers WHERE TeacherID = ?", (teacher_id,))
 
             conn.commit()
             return jsonify({'success': True, 'message': 'Teacher removed successfully'})
@@ -2026,12 +2042,12 @@ def get_teacher_by_name_email():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT TeacherID, Name, Email 
             FROM Teachers 
-            WHERE Name = %s AND Email = %s
+            WHERE Name = ? AND Email = ?
         """, (name, email))
 
         row = cursor.fetchone()
@@ -2079,9 +2095,9 @@ def assign_teacher():
     cursor = None
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT Name FROM Teachers WHERE TeacherID = %s", (teacher_id,))
+        cursor.execute("SELECT Name FROM Teachers WHERE TeacherID = ?", (teacher_id,))
         teacherName = cursor.fetchone()
         if not teacherName:
             conn.rollback()
@@ -2089,7 +2105,7 @@ def assign_teacher():
 
         cursor.execute("""
             SELECT 1 FROM TeacherAssignments 
-            WHERE TeacherID = %s AND ClassID = %s AND SectionID = %s AND SubjectID = %s
+            WHERE TeacherID = ? AND ClassID = ? AND SectionID = ? AND SubjectID = ?
         """, (teacher_id, class_id, section_id, subject_id))
         if cursor.fetchone():
             conn.rollback()
@@ -2100,18 +2116,18 @@ def assign_teacher():
 
         cursor.execute("""
             INSERT INTO TeacherAssignments (TeacherID, ClassID, SectionID, SubjectID)
-            VALUES (%s, %s, %s, %s)
+            VALUES (?, ?, ?, ?)
         """, (teacher_id, class_id, section_id, subject_id))
 
         cursor.execute("""
             SELECT 1 FROM TeacherSubjects 
-            WHERE TeacherID = %s AND SubjectID = %s
+            WHERE TeacherID = ? AND SubjectID = ?
         """, (teacher_id, subject_id))
 
         if not cursor.fetchone():
             cursor.execute("""
                 INSERT INTO TeacherSubjects (TeacherID, SubjectID)
-                VALUES (%s, %s)
+                VALUES (?, ?)
             """, (teacher_id, subject_id))
 
         conn.commit()
@@ -2150,7 +2166,7 @@ def get_classes_for_class():
         offset = (page - 1) * per_page
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT c.ClassID, c.ClassName, c.RoomNumber,
@@ -2162,18 +2178,18 @@ def get_classes_for_class():
         params = []
 
         if class_name:
-            query += " AND c.ClassName ILIKE %s"
+            query += " AND c.ClassName LIKE ?"
             params.append(f'%{class_name}%')
 
         if room_number:
-            query += " AND c.RoomNumber ILIKE %s"
+            query += " AND c.RoomNumber LIKE ?"
             params.append(f'%{room_number}%')
 
         count_query = f"SELECT COUNT(*) as cnt FROM ({query}) as cq"
         cursor.execute(count_query, params)
         total_count = cursor.fetchone()['cnt']
 
-        query += " ORDER BY c.ClassName LIMIT %s OFFSET %s"
+        query += " ORDER BY c.ClassName LIMIT ? OFFSET ?"
         params.extend([per_page, offset])
 
         cursor.execute(query, params)
@@ -2209,7 +2225,7 @@ def get_all_classes():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("SELECT ClassID, ClassName FROM Classes ORDER BY ClassName")
 
@@ -2241,12 +2257,12 @@ def get_sections_for_class():
             return jsonify({'error': 'Class ID is required'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT SectionID, SectionName 
             FROM Sections 
-            WHERE ClassID = %s 
+            WHERE ClassID = ? 
             ORDER BY SectionName
         """, (class_id,))
 
@@ -2278,9 +2294,9 @@ def get_class_details():
             return jsonify({'error': 'Class ID is required'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT ClassID, ClassName, RoomNumber FROM Classes WHERE ClassID = %s", (class_id,))
+        cursor.execute("SELECT ClassID, ClassName, RoomNumber FROM Classes WHERE ClassID = ?", (class_id,))
         class_data = cursor.fetchone()
 
         cursor.close()
@@ -2313,9 +2329,9 @@ def get_section_details():
             return jsonify({'error': 'Section ID is required'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SectionID, ClassID, SectionName FROM Sections WHERE SectionID = %s", (section_id,))
+        cursor.execute("SELECT SectionID, ClassID, SectionName FROM Sections WHERE SectionID = ?", (section_id,))
         section_data = cursor.fetchone()
 
         cursor.close()
@@ -2350,22 +2366,22 @@ def add_class():
             return jsonify({'success': False, 'message': 'Class name and room number are required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassName = %s", (class_name,))
+        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassName = ?", (class_name,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'A class with this name already exists'})
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE RoomNumber = %s", (room_number,))
+        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE RoomNumber = ?", (room_number,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'This room number is already assigned to another class'})
 
         cursor.execute(
-            "INSERT INTO Classes (ClassName, RoomNumber) VALUES (%s, %s)",
+            "INSERT INTO Classes (ClassName, RoomNumber) VALUES (?, ?)",
             (class_name, room_number)
         )
 
@@ -2393,16 +2409,16 @@ def add_section():
             return jsonify({'success': False, 'message': 'Class ID and section name are required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassID = %s", (class_id,))
+        cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassID = ?", (class_id,))
         if cursor.fetchone()['cnt'] == 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'Class not found'})
 
         cursor.execute(
-            "SELECT COUNT(*) as cnt FROM Sections WHERE ClassID = %s AND SectionName = %s",
+            "SELECT COUNT(*) as cnt FROM Sections WHERE ClassID = ? AND SectionName = ?",
             (class_id, section_name)
         )
         if cursor.fetchone()['cnt'] > 0:
@@ -2411,7 +2427,7 @@ def add_section():
             return jsonify({'success': False, 'message': 'A section with this name already exists for this class'})
 
         cursor.execute(
-            "INSERT INTO Sections (ClassID, SectionName) VALUES (%s, %s)",
+            "INSERT INTO Sections (ClassID, SectionName) VALUES (?, ?)",
             (class_id, section_name)
         )
 
@@ -2440,9 +2456,9 @@ def update_class():
             return jsonify({'success': False, 'message': 'Class ID, name, and room number are required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT ClassName, RoomNumber FROM Classes WHERE ClassID = %s", (class_id,))
+        cursor.execute("SELECT ClassName, RoomNumber FROM Classes WHERE ClassID = ?", (class_id,))
         existing_class = cursor.fetchone()
         if not existing_class:
             cursor.close()
@@ -2450,21 +2466,21 @@ def update_class():
             return jsonify({'success': False, 'message': 'Class not found'})
 
         if existing_class['classname'] != class_name:
-            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassName = %s AND ClassID != %s", (class_name, class_id))
+            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassName = ? AND ClassID != ?", (class_name, class_id))
             if cursor.fetchone()['cnt'] > 0:
                 cursor.close()
                 conn.close()
                 return jsonify({'success': False, 'message': 'A class with this name already exists'})
 
         if existing_class['roomnumber'] != room_number:
-            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE RoomNumber = %s AND ClassID != %s", (room_number, class_id))
+            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE RoomNumber = ? AND ClassID != ?", (room_number, class_id))
             if cursor.fetchone()['cnt'] > 0:
                 cursor.close()
                 conn.close()
                 return jsonify({'success': False, 'message': 'This room number is already assigned to another class'})
 
         cursor.execute(
-            "UPDATE Classes SET ClassName = %s, RoomNumber = %s WHERE ClassID = %s",
+            "UPDATE Classes SET ClassName = ?, RoomNumber = ? WHERE ClassID = ?",
             (class_name, room_number, class_id)
         )
 
@@ -2492,9 +2508,9 @@ def update_section():
             return jsonify({'success': False, 'message': 'Section ID and name are required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SectionName, ClassID FROM Sections WHERE SectionID = %s", (section_id,))
+        cursor.execute("SELECT SectionName, ClassID FROM Sections WHERE SectionID = ?", (section_id,))
         existing_section = cursor.fetchone()
         if not existing_section:
             cursor.close()
@@ -2503,7 +2519,7 @@ def update_section():
 
         if existing_section['sectionname'] != section_name:
             cursor.execute(
-                "SELECT COUNT(*) as cnt FROM Sections WHERE SectionName = %s AND ClassID = %s AND SectionID != %s",
+                "SELECT COUNT(*) as cnt FROM Sections WHERE SectionName = ? AND ClassID = ? AND SectionID != ?",
                 (section_name, existing_section['classid'], section_id)
             )
             if cursor.fetchone()['cnt'] > 0:
@@ -2512,7 +2528,7 @@ def update_section():
                 return jsonify({'success': False, 'message': 'A section with this name already exists for this class'})
 
         cursor.execute(
-            "UPDATE Sections SET SectionName = %s WHERE SectionID = %s",
+            "UPDATE Sections SET SectionName = ? WHERE SectionID = ?",
             (section_name, section_id)
         )
 
@@ -2539,24 +2555,24 @@ def remove_class():
             return jsonify({'success': False, 'message': 'Class ID is required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassID = %s", (class_id,))
+            cursor.execute("SELECT COUNT(*) as cnt FROM Classes WHERE ClassID = ?", (class_id,))
             if cursor.fetchone()['cnt'] == 0:
                 return jsonify({'success': False, 'message': 'Class not found'})
 
-            cursor.execute("DELETE FROM ExamResults WHERE ExamID IN (SELECT e.ExamID FROM Exams e JOIN Subjects s ON e.SubjectID = s.SubjectID WHERE s.ClassID = %s)", (class_id,))
-            cursor.execute("DELETE FROM Exams WHERE SubjectID IN (SELECT SubjectID FROM Subjects WHERE ClassID = %s)", (class_id,))
-            cursor.execute("DELETE FROM TeacherActivities WHERE ClassID = %s", (class_id,))
-            cursor.execute("DELETE FROM TeacherAssignments WHERE ClassID = %s", (class_id,))
-            cursor.execute("DELETE FROM TeacherSubjects WHERE SubjectID IN (SELECT SubjectID FROM Subjects WHERE ClassID = %s)", (class_id,))
-            cursor.execute("DELETE FROM Attendance WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE ClassID = %s)", (class_id,))
-            cursor.execute("DELETE FROM Fees WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE ClassID = %s)", (class_id,))
-            cursor.execute("DELETE FROM Enrollments WHERE ClassID = %s", (class_id,))
-            cursor.execute("DELETE FROM Subjects WHERE ClassID = %s", (class_id,))
-            cursor.execute("DELETE FROM Sections WHERE ClassID = %s", (class_id,))
-            cursor.execute("DELETE FROM Classes WHERE ClassID = %s", (class_id,))
+            cursor.execute("DELETE FROM ExamResults WHERE ExamID IN (SELECT e.ExamID FROM Exams e JOIN Subjects s ON e.SubjectID = s.SubjectID WHERE s.ClassID = ?)", (class_id,))
+            cursor.execute("DELETE FROM Exams WHERE SubjectID IN (SELECT SubjectID FROM Subjects WHERE ClassID = ?)", (class_id,))
+            cursor.execute("DELETE FROM TeacherActivities WHERE ClassID = ?", (class_id,))
+            cursor.execute("DELETE FROM TeacherAssignments WHERE ClassID = ?", (class_id,))
+            cursor.execute("DELETE FROM TeacherSubjects WHERE SubjectID IN (SELECT SubjectID FROM Subjects WHERE ClassID = ?)", (class_id,))
+            cursor.execute("DELETE FROM Attendance WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE ClassID = ?)", (class_id,))
+            cursor.execute("DELETE FROM Fees WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE ClassID = ?)", (class_id,))
+            cursor.execute("DELETE FROM Enrollments WHERE ClassID = ?", (class_id,))
+            cursor.execute("DELETE FROM Subjects WHERE ClassID = ?", (class_id,))
+            cursor.execute("DELETE FROM Sections WHERE ClassID = ?", (class_id,))
+            cursor.execute("DELETE FROM Classes WHERE ClassID = ?", (class_id,))
 
             conn.commit()
             cursor.close()
@@ -2587,20 +2603,20 @@ def remove_section():
             return jsonify({'success': False, 'message': 'Section ID is required'})
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("SELECT ClassID FROM Sections WHERE SectionID = %s", (section_id,))
+            cursor.execute("SELECT ClassID FROM Sections WHERE SectionID = ?", (section_id,))
             section_data = cursor.fetchone()
             if not section_data:
                 return jsonify({'success': False, 'message': 'Section not found'})
 
-            cursor.execute("DELETE FROM TeacherActivities WHERE SectionID = %s", (section_id,))
-            cursor.execute("DELETE FROM TeacherAssignments WHERE SectionID = %s", (section_id,))
-            cursor.execute("DELETE FROM Attendance WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE SectionID = %s)", (section_id,))
-            cursor.execute("DELETE FROM Fees WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE SectionID = %s)", (section_id,))
-            cursor.execute("DELETE FROM Enrollments WHERE SectionID = %s", (section_id,))
-            cursor.execute("DELETE FROM Sections WHERE SectionID = %s", (section_id,))
+            cursor.execute("DELETE FROM TeacherActivities WHERE SectionID = ?", (section_id,))
+            cursor.execute("DELETE FROM TeacherAssignments WHERE SectionID = ?", (section_id,))
+            cursor.execute("DELETE FROM Attendance WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE SectionID = ?)", (section_id,))
+            cursor.execute("DELETE FROM Fees WHERE StudentID IN (SELECT StudentID FROM Enrollments WHERE SectionID = ?)", (section_id,))
+            cursor.execute("DELETE FROM Enrollments WHERE SectionID = ?", (section_id,))
+            cursor.execute("DELETE FROM Sections WHERE SectionID = ?", (section_id,))
 
             conn.commit()
             cursor.close()
@@ -2633,7 +2649,7 @@ def get_subjects_for_subs():
         offset = (page - 1) * items_per_page
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         base_query = """
             SELECT DISTINCT s.SubjectID, s.SubjectName,
@@ -2650,19 +2666,19 @@ def get_subjects_for_subs():
         params = []
 
         if subject_name:
-            base_query += " AND s.SubjectName ILIKE %s"
-            count_query += " AND s.SubjectName ILIKE %s"
+            base_query += " AND s.SubjectName LIKE ?"
+            count_query += " AND s.SubjectName LIKE ?"
             params.append(f'%{subject_name}%')
 
         if class_id:
-            base_query += " AND s.ClassID = %s"
-            count_query += " AND s.ClassID = %s"
+            base_query += " AND s.ClassID = ?"
+            count_query += " AND s.ClassID = ?"
             params.append(class_id)
 
         cursor.execute(count_query, params)
         total_count = cursor.fetchone()['cnt']
 
-        base_query += " ORDER BY s.SubjectName LIMIT %s OFFSET %s"
+        base_query += " ORDER BY s.SubjectName LIMIT ? OFFSET ?"
         pagination_params = params.copy()
         pagination_params.append(items_per_page)
         pagination_params.append(offset)
@@ -2700,7 +2716,7 @@ def get_all_classes_for_subs():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("SELECT ClassID, ClassName, RoomNumber FROM Classes ORDER BY ClassName")
 
@@ -2727,7 +2743,7 @@ def get_all_subjects():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("SELECT DISTINCT SubjectID, SubjectName FROM Subjects ORDER BY SubjectName")
 
@@ -2757,13 +2773,13 @@ def get_classes_for_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT c.ClassID, c.ClassName, c.RoomNumber
             FROM Classes c
             JOIN Subjects s ON c.ClassID = s.ClassID
-            WHERE s.SubjectID = %s
+            WHERE s.SubjectID = ?
             ORDER BY c.ClassName
         """, (subject_id,))
 
@@ -2794,9 +2810,9 @@ def get_available_classes_for_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SubjectName FROM Subjects WHERE SubjectID = %s", (subject_id,))
+        cursor.execute("SELECT SubjectName FROM Subjects WHERE SubjectID = ?", (subject_id,))
         subject_data = cursor.fetchone()
         if not subject_data:
             return jsonify({'error': 'Subject not found'}), 404
@@ -2809,7 +2825,7 @@ def get_available_classes_for_subject():
             WHERE c.ClassID NOT IN (
                 SELECT s.ClassID 
                 FROM Subjects s 
-                WHERE s.SubjectName = %s
+                WHERE s.SubjectName = ?
             )
             ORDER BY c.ClassName
         """, (subject_name,))
@@ -2843,9 +2859,9 @@ def get_subject_details():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SubjectID, SubjectName, ClassID FROM Subjects WHERE SubjectID = %s AND ClassID = %s", (subject_id, class_id))
+        cursor.execute("SELECT SubjectID, SubjectName, ClassID FROM Subjects WHERE SubjectID = ? AND ClassID = ?", (subject_id, class_id))
         subject_data = cursor.fetchone()
 
         cursor.close()
@@ -2876,15 +2892,15 @@ def add_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = %s AND ClassID = %s", (subject_name, class_id))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = ? AND ClassID = ?", (subject_name, class_id))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'This subject already exists for the selected class'})
 
-        cursor.execute("INSERT INTO Subjects (SubjectName, ClassID) VALUES (%s, %s)", (subject_name, class_id))
+        cursor.execute("INSERT INTO Subjects (SubjectName, ClassID) VALUES (?, ?)", (subject_name, class_id))
 
         conn.commit()
         cursor.close()
@@ -2909,15 +2925,15 @@ def update_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = %s AND ClassID = %s AND SubjectID != %s", (subject_name, class_id, subject_id))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = ? AND ClassID = ? AND SubjectID != ?", (subject_name, class_id, subject_id))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'This subject already exists for the selected class'})
 
-        cursor.execute("UPDATE Subjects SET SubjectName = %s WHERE SubjectID = %s AND ClassID = %s", (subject_name, subject_id, class_id))
+        cursor.execute("UPDATE Subjects SET SubjectName = ? WHERE SubjectID = ? AND ClassID = ?", (subject_name, subject_id, class_id))
 
         conn.commit()
         cursor.close()
@@ -2941,13 +2957,13 @@ def remove_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM ExamResults WHERE ExamID IN (SELECT ExamID FROM Exams WHERE SubjectID = %s)", (subject_id,))
-        cursor.execute("DELETE FROM Exams WHERE SubjectID = %s", (subject_id,))
-        cursor.execute("DELETE FROM TeacherAssignments WHERE SubjectID = %s AND ClassID = %s", (subject_id, class_id))
-        cursor.execute("DELETE FROM TeacherSubjects WHERE SubjectID = %s", (subject_id,))
-        cursor.execute("DELETE FROM Subjects WHERE SubjectID = %s AND ClassID = %s", (subject_id, class_id))
+        cursor.execute("DELETE FROM ExamResults WHERE ExamID IN (SELECT ExamID FROM Exams WHERE SubjectID = ?)", (subject_id,))
+        cursor.execute("DELETE FROM Exams WHERE SubjectID = ?", (subject_id,))
+        cursor.execute("DELETE FROM TeacherAssignments WHERE SubjectID = ? AND ClassID = ?", (subject_id, class_id))
+        cursor.execute("DELETE FROM TeacherSubjects WHERE SubjectID = ?", (subject_id,))
+        cursor.execute("DELETE FROM Subjects WHERE SubjectID = ? AND ClassID = ?", (subject_id, class_id))
 
         conn.commit()
         cursor.close()
@@ -2974,9 +2990,9 @@ def assign_subject_to_class():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SubjectName FROM Subjects WHERE SubjectID = %s", (subject_id,))
+        cursor.execute("SELECT SubjectName FROM Subjects WHERE SubjectID = ?", (subject_id,))
         subject_data = cursor.fetchone()
         if not subject_data:
             cursor.close()
@@ -2985,13 +3001,13 @@ def assign_subject_to_class():
 
         subject_name = subject_data['subjectname']
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = %s AND ClassID = %s", (subject_name, class_id))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Subjects WHERE SubjectName = ? AND ClassID = ?", (subject_name, class_id))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'This subject is already assigned to the selected class'})
 
-        cursor.execute("INSERT INTO Subjects (SubjectName, ClassID) VALUES (%s, %s)", (subject_name, class_id))
+        cursor.execute("INSERT INTO Subjects (SubjectName, ClassID) VALUES (?, ?)", (subject_name, class_id))
 
         conn.commit()
         cursor.close()
@@ -3024,17 +3040,17 @@ def get_admins():
         role = request.args.get('role', '')
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = "SELECT * FROM Admins WHERE 1=1"
         params = []
 
         if username:
-            query += " AND Username ILIKE %s"
+            query += " AND Username LIKE ?"
             params.append(f'%{username}%')
 
         if role:
-            query += " AND Role = %s"
+            query += " AND Role = ?"
             params.append(role)
 
         count_query = f"SELECT COUNT(*) AS total FROM ({query}) AS filtered_results"
@@ -3043,7 +3059,7 @@ def get_admins():
 
         total_pages = (total_records + per_page - 1) // per_page
 
-        query += " ORDER BY AdminID LIMIT %s OFFSET %s"
+        query += " ORDER BY AdminID LIMIT ? OFFSET ?"
         params.append(per_page)
         params.append((page - 1) * per_page)
 
@@ -3076,7 +3092,7 @@ def get_all_admins():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("SELECT AdminID, Username FROM Admins ORDER BY Username")
 
         admins = []
@@ -3098,7 +3114,7 @@ def get_all_teachers():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("SELECT TeacherID, Name, Email FROM Teachers ORDER BY Name")
 
         teachers = []
@@ -3124,8 +3140,8 @@ def get_admin_details():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
-        cursor.execute("SELECT AdminID, Username, Role FROM Admins WHERE AdminID = %s", (admin_id,))
+        cursor = conn.cursor()
+        cursor.execute("SELECT AdminID, Username, Role FROM Admins WHERE AdminID = ?", (admin_id,))
 
         admin = cursor.fetchone()
         if not admin:
@@ -3152,8 +3168,8 @@ def get_teacher_details():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
-        cursor.execute("SELECT TeacherID, Name, Email FROM Teachers WHERE TeacherID = %s", (teacher_id,))
+        cursor = conn.cursor()
+        cursor.execute("SELECT TeacherID, Name, Email FROM Teachers WHERE TeacherID = ?", (teacher_id,))
 
         teacher = cursor.fetchone()
         if not teacher:
@@ -3187,15 +3203,15 @@ def add_admin_for_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = %s", (username,))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = ?", (username,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'Email already exists'}), 400
 
-        cursor.execute("INSERT INTO Admins (Username, PasswordHash, Role) VALUES (%s, %s, %s)", (username, password, role))
+        cursor.execute("INSERT INTO Admins (Username, PasswordHash, Role) VALUES (?, ?, ?)", (username, password, role))
         conn.commit()
 
         cursor.close()
@@ -3225,18 +3241,18 @@ def update_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = %s AND AdminID != %s", (username, admin_id))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = ? AND AdminID != ?", (username, admin_id))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'Email already exists for another admin'}), 400
 
         if password:
-            cursor.execute("UPDATE Admins SET Username = %s, PasswordHash = %s, Role = %s WHERE AdminID = %s", (username, password, role, admin_id))
+            cursor.execute("UPDATE Admins SET Username = ?, PasswordHash = ?, Role = ? WHERE AdminID = ?", (username, password, role, admin_id))
         else:
-            cursor.execute("UPDATE Admins SET Username = %s, Role = %s WHERE AdminID = %s", (username, role, admin_id))
+            cursor.execute("UPDATE Admins SET Username = ?, Role = ? WHERE AdminID = ?", (username, role, admin_id))
 
         conn.commit()
         cursor.close()
@@ -3260,8 +3276,8 @@ def remove_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
-        cursor.execute("DELETE FROM Admins WHERE AdminID = %s", (admin_id,))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM Admins WHERE AdminID = ?", (admin_id,))
         conn.commit()
         cursor.close()
         conn.close()
@@ -3290,15 +3306,15 @@ def make_teacher_admin():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = %s", (username,))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Admins WHERE Username = ?", (username,))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'Email already exists as an admin account'}), 400
 
-        cursor.execute("INSERT INTO Admins (Username, PasswordHash, Role) VALUES (%s, %s, %s)", (username, password, role))
+        cursor.execute("INSERT INTO Admins (Username, PasswordHash, Role) VALUES (?, ?, ?)", (username, password, role))
         conn.commit()
 
         cursor.close()
@@ -3321,7 +3337,7 @@ def admin_management():
 def get_classes_1():
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("SELECT ClassID, ClassName FROM Classes ORDER BY ClassName")
 
         classes = []
@@ -3344,8 +3360,8 @@ def get_sections_by_class():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
-        cursor.execute("SELECT SectionID, SectionName FROM Sections WHERE ClassID = %s ORDER BY SectionName", (class_id,))
+        cursor = conn.cursor()
+        cursor.execute("SELECT SectionID, SectionName FROM Sections WHERE ClassID = ? ORDER BY SectionName", (class_id,))
 
         sections = []
         for row in cursor.fetchall():
@@ -3363,14 +3379,14 @@ def get_sections_by_class():
 def get_student_by_id(student_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
         cursor.execute("""
             SELECT s.StudentID, s.Name, c.ClassName, sec.SectionName 
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN Classes c ON e.ClassID = c.ClassID
             JOIN Sections sec ON e.SectionID = sec.SectionID
-            WHERE s.StudentID = %s AND e.Status = 'Active'
+            WHERE s.StudentID = ? AND e.Status = 'Active'
         """, (student_id,))
 
         student = cursor.fetchone()
@@ -3404,13 +3420,13 @@ def add_student_fee():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT COUNT(*) AS student_count 
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE s.StudentID = %s AND e.Status = 'Active'
+            WHERE s.StudentID = ? AND e.Status = 'Active'
         """, (student_id,))
 
         if cursor.fetchone()['student_count'] == 0:
@@ -3418,7 +3434,7 @@ def add_student_fee():
 
         cursor.execute("""
             INSERT INTO Fees (StudentID, Amount, DueDate, PaidDate, Status)
-            VALUES (%s, %s, %s, NULL, 'Unpaid') RETURNING FeeID
+            VALUES (?, ?, ?, NULL, 'Unpaid') RETURNING FeeID
         """, (student_id, amount, due_date))
 
         fee_id = cursor.fetchone()['feeid']
@@ -3445,13 +3461,13 @@ def add_class_fees():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT s.StudentID
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND e.Status = 'Active'
+            WHERE e.ClassID = ? AND e.SectionID = ? AND e.Status = 'Active'
         """, (class_id, section_id))
 
         students = cursor.fetchall()
@@ -3462,7 +3478,7 @@ def add_class_fees():
         for student in students:
             cursor.execute("""
                 INSERT INTO Fees (StudentID, Amount, DueDate, PaidDate, Status)
-                VALUES (%s, %s, %s, NULL, 'Unpaid')
+                VALUES (?, ?, ?, NULL, 'Unpaid')
             """, (student['studentid'], amount, due_date))
             count += 1
 
@@ -3482,12 +3498,12 @@ def get_unpaid_fees():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT f.FeeID, s.StudentID, s.Name AS studentname, 
                    c.ClassName, sec.SectionName, f.Amount, 
-                   f.DueDate, NOW() AS issuedate, f.Status, e.Status AS enrollmentstatus
+                   f.DueDate, CURRENT_TIMESTAMP AS issuedate, f.Status, e.Status AS enrollmentstatus
             FROM Fees f
             JOIN Students s ON f.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
@@ -3498,10 +3514,10 @@ def get_unpaid_fees():
         params = []
 
         if class_id:
-            query += " AND e.ClassID = %s"
+            query += " AND e.ClassID = ?"
             params.append(class_id)
             if section_id:
-                query += " AND e.SectionID = %s"
+                query += " AND e.SectionID = ?"
                 params.append(section_id)
 
         query += " ORDER BY f.DueDate"
@@ -3534,7 +3550,7 @@ def get_unpaid_fees():
 def get_all_unpaid_fees():
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID, s.StudentID, s.Name AS studentname, f.Amount, f.DueDate
@@ -3566,12 +3582,12 @@ def get_all_unpaid_fees():
 def get_student_unpaid_fees(student_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID, f.Amount, f.DueDate
             FROM Fees f
-            WHERE f.StudentID = %s AND f.Status = 'Unpaid'
+            WHERE f.StudentID = ? AND f.Status = 'Unpaid'
             ORDER BY f.DueDate
         """, (student_id,))
 
@@ -3595,14 +3611,14 @@ def get_student_unpaid_fees(student_id):
 def get_class_section_unpaid_fees(class_id, section_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID, s.StudentID, s.Name AS studentname, f.Amount, f.DueDate
             FROM Fees f
             JOIN Students s ON f.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND f.Status = 'Unpaid' AND e.Status = 'Active'
+            WHERE e.ClassID = ? AND e.SectionID = ? AND f.Status = 'Unpaid' AND e.Status = 'Active'
             ORDER BY s.Name
         """, (class_id, section_id))
 
@@ -3628,7 +3644,7 @@ def get_class_section_unpaid_fees(class_id, section_id):
 def get_fee_by_id(fee_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID, s.StudentID, s.Name AS studentname, 
@@ -3638,7 +3654,7 @@ def get_fee_by_id(fee_id):
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN Classes c ON e.ClassID = c.ClassID
             JOIN Sections sec ON e.SectionID = sec.SectionID
-            WHERE f.FeeID = %s
+            WHERE f.FeeID = ?
         """, (fee_id,))
 
         fee = cursor.fetchone()
@@ -3675,9 +3691,9 @@ def update_fee(fee_id):
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT Status FROM Fees WHERE FeeID = %s", (fee_id,))
+        cursor.execute("SELECT Status FROM Fees WHERE FeeID = ?", (fee_id,))
         fee = cursor.fetchone()
 
         if not fee:
@@ -3690,16 +3706,16 @@ def update_fee(fee_id):
         params = []
 
         if amount:
-            query += "Amount = %s"
+            query += "Amount = ?"
             params.append(amount)
 
         if due_date:
             if amount:
                 query += ", "
-            query += "DueDate = %s"
+            query += "DueDate = ?"
             params.append(due_date)
 
-        query += " WHERE FeeID = %s"
+        query += " WHERE FeeID = ?"
         params.append(fee_id)
 
         cursor.execute(query, params)
@@ -3729,14 +3745,14 @@ def update_class_fees():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID
             FROM Fees f
             JOIN Students s ON f.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
-            WHERE e.ClassID = %s AND e.SectionID = %s AND f.Status = 'Unpaid' AND e.Status = 'Active'
+            WHERE e.ClassID = ? AND e.SectionID = ? AND f.Status = 'Unpaid' AND e.Status = 'Active'
         """, (class_id, section_id))
 
         fee_ids = cursor.fetchall()
@@ -3749,16 +3765,16 @@ def update_class_fees():
         params = []
 
         if amount:
-            query += "Amount = %s"
+            query += "Amount = ?"
             params.append(amount)
 
         if due_date:
             if amount:
                 query += ", "
-            query += "DueDate = %s"
+            query += "DueDate = ?"
             params.append(due_date)
 
-        query += " WHERE FeeID IN (" + ", ".join(["%s"] * len(fee_id_list)) + ") AND Status = 'Unpaid'"
+        query += " WHERE FeeID IN (" + ", ".join(["?"] * len(fee_id_list)) + ") AND Status = 'Unpaid'"
         params.extend(fee_id_list)
 
         cursor.execute(query, params)
@@ -3784,18 +3800,18 @@ def update_fee_status(fee_id):
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM Fees WHERE FeeID = %s", (fee_id,))
+        cursor.execute("SELECT * FROM Fees WHERE FeeID = ?", (fee_id,))
         fee = cursor.fetchone()
 
         if not fee:
             return jsonify({'error': 'Fee not found'}), 404
 
         if status == 'Paid':
-            cursor.execute("UPDATE Fees SET Status = 'Paid', PaidDate = %s WHERE FeeID = %s", (datetime.now().strftime('%Y-%m-%d'), fee_id))
+            cursor.execute("UPDATE Fees SET Status = 'Paid', PaidDate = ? WHERE FeeID = ?", (datetime.now().strftime('%Y-%m-%d'), fee_id))
         else:
-            cursor.execute("UPDATE Fees SET Status = 'Unpaid', PaidDate = NULL WHERE FeeID = %s", (fee_id,))
+            cursor.execute("UPDATE Fees SET Status = 'Unpaid', PaidDate = NULL WHERE FeeID = ?", (fee_id,))
 
         conn.commit()
         cursor.close()
@@ -3810,18 +3826,18 @@ def update_fee_status(fee_id):
 def generate_fee_slip(fee_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT f.FeeID, s.StudentID, s.Name AS studentname, 
                    c.ClassName, sec.SectionName, f.Amount, 
-                   f.DueDate, NOW() AS issuedate, f.Status, e.AcademicYear
+                   f.DueDate, CURRENT_TIMESTAMP AS issuedate, f.Status, e.AcademicYear
             FROM Fees f
             JOIN Students s ON f.StudentID = s.StudentID
             JOIN Enrollments e ON s.StudentID = e.StudentID
             JOIN Classes c ON e.ClassID = c.ClassID
             JOIN Sections sec ON e.SectionID = sec.SectionID
-            WHERE f.FeeID = %s
+            WHERE f.FeeID = ?
         """, (fee_id,))
 
         fee = cursor.fetchone()
@@ -3856,12 +3872,12 @@ def get_overdue_students():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT s.StudentID, s.Name AS studentname, c.ClassName, sec.SectionName,
                    SUM(f.Amount) AS totaldue, MIN(f.DueDate) AS duedate,
-                   (CURRENT_DATE - MIN(f.DueDate)) AS daysoverdue,
+                   CAST((julianday('now') - julianday(MIN(f.DueDate))) AS INTEGER) AS daysoverdue,
                    e.Status AS enrollmentstatus
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
@@ -3869,16 +3885,16 @@ def get_overdue_students():
             JOIN Sections sec ON e.SectionID = sec.SectionID
             JOIN Fees f ON s.StudentID = f.StudentID
             WHERE f.Status = 'Unpaid'
-                  AND (CURRENT_DATE - f.DueDate) > 90
+                  AND CAST((julianday('now') - julianday(f.DueDate)) AS INTEGER) > 90
                   AND e.Status = 'Active'
         """
         params = []
 
         if class_id:
-            query += " AND e.ClassID = %s"
+            query += " AND e.ClassID = ?"
             params.append(class_id)
             if section_id:
-                query += " AND e.SectionID = %s"
+                query += " AND e.SectionID = ?"
                 params.append(section_id)
 
         query += " GROUP BY s.StudentID, s.Name, c.ClassName, sec.SectionName, e.Status"
@@ -3911,13 +3927,13 @@ def get_overdue_students():
 def disenroll_student(student_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS student_count FROM Enrollments WHERE StudentID = %s AND Status = 'Active'", (student_id,))
+        cursor.execute("SELECT COUNT(*) AS student_count FROM Enrollments WHERE StudentID = ? AND Status = 'Active'", (student_id,))
         if cursor.fetchone()['student_count'] == 0:
             return jsonify({'error': 'Student not found or already inactive'}), 404
 
-        cursor.execute("UPDATE Enrollments SET Status = 'Inactive' WHERE StudentID = %s AND Status = 'Active'", (student_id,))
+        cursor.execute("UPDATE Enrollments SET Status = 'Inactive' WHERE StudentID = ? AND Status = 'Active'", (student_id,))
         conn.commit()
 
         cursor.close()
@@ -3935,12 +3951,12 @@ def get_eligible_reenroll_students():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT s.StudentID, s.Name AS studentname, c.ClassName, sec.SectionName,
                    f.Amount, f.PaidDate,
-                   (f.PaidDate - f.DueDate) AS daysoverdue,
+                   CAST((julianday(f.PaidDate) - julianday(f.DueDate)) AS INTEGER) AS daysoverdue,
                    e.Status AS enrollmentstatus
             FROM Students s
             JOIN Enrollments e ON s.StudentID = e.StudentID
@@ -3948,16 +3964,16 @@ def get_eligible_reenroll_students():
             JOIN Sections sec ON e.SectionID = sec.SectionID
             JOIN Fees f ON s.StudentID = f.StudentID
             WHERE f.Status = 'Paid'
-                  AND (f.PaidDate - f.DueDate) > 90
+                  AND CAST((julianday(f.PaidDate) - julianday(f.DueDate)) AS INTEGER) > 90
                   AND e.Status = 'Inactive'
         """
         params = []
 
         if class_id:
-            query += " AND e.ClassID = %s"
+            query += " AND e.ClassID = ?"
             params.append(class_id)
             if section_id:
-                query += " AND e.SectionID = %s"
+                query += " AND e.SectionID = ?"
                 params.append(section_id)
 
         query += " ORDER BY f.PaidDate DESC"
@@ -3988,13 +4004,13 @@ def get_eligible_reenroll_students():
 def reenroll_student(student_id):
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS student_count FROM Enrollments WHERE StudentID = %s AND Status = 'Inactive'", (student_id,))
+        cursor.execute("SELECT COUNT(*) AS student_count FROM Enrollments WHERE StudentID = ? AND Status = 'Inactive'", (student_id,))
         if cursor.fetchone()['student_count'] == 0:
             return jsonify({'error': 'Student not found or already active'}), 404
 
-        cursor.execute("UPDATE Enrollments SET Status = 'Active' WHERE StudentID = %s AND Status = 'Inactive'", (student_id,))
+        cursor.execute("UPDATE Enrollments SET Status = 'Active' WHERE StudentID = ? AND Status = 'Inactive'", (student_id,))
         conn.commit()
 
         cursor.close()
@@ -4021,7 +4037,7 @@ def get_all_subjects_for_exam():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("SELECT SubjectID, SubjectName FROM Subjects ORDER BY SubjectName")
 
@@ -4052,7 +4068,7 @@ def get_exams_for_exam():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         query = """
             SELECT e.ExamID, e.SubjectID, s.SubjectName, e.ExamDate, e.TotalMarks
@@ -4063,22 +4079,22 @@ def get_exams_for_exam():
         params = []
 
         if subject_id:
-            query += " AND e.SubjectID = %s"
+            query += " AND e.SubjectID = ?"
             params.append(subject_id)
 
         if date_from:
-            query += " AND e.ExamDate >= %s"
+            query += " AND e.ExamDate >= ?"
             params.append(date_from)
 
         if date_to:
-            query += " AND e.ExamDate <= %s"
+            query += " AND e.ExamDate <= ?"
             params.append(date_to)
 
         count_query = query.replace("SELECT e.ExamID, e.SubjectID, s.SubjectName, e.ExamDate, e.TotalMarks", "SELECT COUNT(*)")
         cursor.execute(count_query, params)
         total_count = cursor.fetchone()['count']
 
-        query += " ORDER BY e.ExamDate DESC LIMIT %s OFFSET %s"
+        query += " ORDER BY e.ExamDate DESC LIMIT ? OFFSET ?"
         params.extend([page_size, offset])
 
         cursor.execute(query, params)
@@ -4119,12 +4135,12 @@ def get_exams_by_subject():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT e.ExamID, e.ExamDate, e.TotalMarks
             FROM Exams e
-            WHERE e.SubjectID = %s
+            WHERE e.SubjectID = ?
             ORDER BY e.ExamDate DESC
         """, (subject_id,))
 
@@ -4155,13 +4171,13 @@ def get_exam_details():
 
     try:
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT e.ExamID, e.SubjectID, s.SubjectName, e.ExamDate, e.TotalMarks
             FROM Exams e
             JOIN Subjects s ON e.SubjectID = s.SubjectID
-            WHERE e.ExamID = %s
+            WHERE e.ExamID = ?
         """, (exam_id,))
 
         row = cursor.fetchone()
@@ -4207,15 +4223,15 @@ def schedule_exam():
             return jsonify({'success': False, 'message': 'Invalid total marks value'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Exams WHERE SubjectID = %s AND ExamDate = %s", (subject_id, exam_date))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Exams WHERE SubjectID = ? AND ExamDate = ?", (subject_id, exam_date))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'An exam is already scheduled for this subject on this date'}), 400
 
-        cursor.execute("INSERT INTO Exams (SubjectID, ExamDate, TotalMarks) VALUES (%s, %s, %s)", (subject_id, exam_date, total_marks))
+        cursor.execute("INSERT INTO Exams (SubjectID, ExamDate, TotalMarks) VALUES (?, ?, ?)", (subject_id, exam_date, total_marks))
 
         conn.commit()
         cursor.close()
@@ -4248,9 +4264,9 @@ def update_exam():
             return jsonify({'success': False, 'message': 'Invalid total marks value'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
-        cursor.execute("SELECT SubjectID FROM Exams WHERE ExamID = %s", (exam_id,))
+        cursor.execute("SELECT SubjectID FROM Exams WHERE ExamID = ?", (exam_id,))
         result = cursor.fetchone()
         if not result:
             cursor.close()
@@ -4259,13 +4275,13 @@ def update_exam():
 
         subject_id = result['subjectid']
 
-        cursor.execute("SELECT COUNT(*) AS cnt FROM Exams WHERE SubjectID = %s AND ExamDate = %s AND ExamID != %s", (subject_id, exam_date, exam_id))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM Exams WHERE SubjectID = ? AND ExamDate = ? AND ExamID != ?", (subject_id, exam_date, exam_id))
         if cursor.fetchone()['cnt'] > 0:
             cursor.close()
             conn.close()
             return jsonify({'success': False, 'message': 'Another exam is already scheduled for this subject on this date'}), 400
 
-        cursor.execute("UPDATE Exams SET ExamDate = %s, TotalMarks = %s WHERE ExamID = %s", (exam_date, total_marks, exam_id))
+        cursor.execute("UPDATE Exams SET ExamDate = ?, TotalMarks = ? WHERE ExamID = ?", (exam_date, total_marks, exam_id))
 
         conn.commit()
         cursor.close()
@@ -4289,11 +4305,11 @@ def remove_exam():
             return jsonify({'success': False, 'message': 'Exam ID is required'}), 400
 
         conn = get_db_connection()
-        cursor = dict_cursor(conn)
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("DELETE FROM ExamResults WHERE ExamID = %s", (exam_id,))
-            cursor.execute("DELETE FROM Exams WHERE ExamID = %s", (exam_id,))
+            cursor.execute("DELETE FROM ExamResults WHERE ExamID = ?", (exam_id,))
+            cursor.execute("DELETE FROM Exams WHERE ExamID = ?", (exam_id,))
             exams_deleted = cursor.rowcount
 
             conn.commit()

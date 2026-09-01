@@ -1,6 +1,6 @@
 # School Database Management System
 
-A full-stack School Database Management System built with **Flask** and **PostgreSQL**, specially configured for **Vercel** serverless deployment.
+A full-stack School Database Management System built with **Flask** and **SQLite**, specially configured for **Vercel** serverless deployment.
 
 ## Features
 - **Admin Dashboard**: Manage students, teachers, classes, sections, subjects, exams, fees, and admins.
@@ -10,46 +10,34 @@ A full-stack School Database Management System built with **Flask** and **Postgr
 
 ## Tech Stack
 - **Backend**: Flask (Python) via Vercel Serverless Functions
-- **Database**: PostgreSQL (via Supabase)
+- **Database**: SQLite (In-Memory / Temporary Storage on Vercel)
 - **Deployment**: Vercel
 
 ---
 
 ## 🚀 Deployment Guide (How to Deploy to Vercel)
 
-This project has been configured to deploy seamlessly on Vercel. Follow these steps to get your app live.
+This project has been configured to deploy seamlessly on Vercel with a temporary SQLite database.
 
-### Step 1: Set up the Database (Supabase)
-Since Vercel is a serverless platform, it cannot host a traditional SQL Server. We use **Supabase (PostgreSQL)** which is free and works perfectly with Vercel.
+> **Important Note about SQLite on Vercel**: 
+> Vercel is a serverless platform. Because we are using SQLite, the database file is saved in the temporary `/tmp` directory. Vercel automatically spins down serverless functions after a period of inactivity, which means **the database will reset automatically every few hours/minutes**.
+> This setup is perfect for **school projects, assignments, and temporary demos**, but should not be used if you want to permanently save data.
 
-1. Go to [Supabase](https://supabase.com) and create a free account.
-2. Click **New Project** and set it up (save the database password somewhere safe).
-3. Once the project is created, go to the **SQL Editor** from the left menu.
-4. Copy the entire code from the `db_schema.sql` file in this repository.
-5. Paste it into the SQL Editor and click **Run**. This will create all your tables and insert the default Admin account.
-6. Now, go to **Project Settings** (gear icon) > **Database**.
-7. Scroll down to **Connection String** -> **URI**.
-8. Copy that URL. It looks something like this:
-   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxx.supabase.co:5432/postgres`
-   *(Replace `[YOUR-PASSWORD]` with the password you created in step 2)*
-
-### Step 2: Deploy to Vercel
+### Deploy to Vercel
 
 1. Go to [Vercel](https://vercel.com) and log in with your GitHub account.
 2. Click **Add New...** > **Project**.
 3. Import this GitHub repository (`School_Database_managment-_system`).
-4. In the "Configure Project" screen, expand the **Environment Variables** section.
-5. Add the following:
-   - **Name**: `DATABASE_URL`
-   - **Value**: *(Paste the Supabase connection string you copied in Step 1)*
-6. Click **Deploy**.
+4. Click **Deploy**.
 
-Vercel will now install the dependencies (Flask, Psycopg2) and deploy your app. Once done, it will give you a live URL!
+Vercel will install the dependencies (Flask) and deploy your app. Once done, it will give you a live URL!
+
+The database will be automatically initialized the first time you visit the deployed site.
 
 ---
 
 ## Default Login Credentials
-After running the SQL script in Step 1, a default admin account is created for you:
+Upon the first run, a default admin account is automatically created for you:
 
 - **Email**: `admin@school.com`
 - **Password**: `admin123`
@@ -68,13 +56,10 @@ If you want to create a new account from the signup page, use these PINs:
    ```bash
    pip install -r requirements.txt
    ```
-3. Set your Database URL environment variable (in Windows PowerShell):
-   ```powershell
-   $env:DATABASE_URL="your_supabase_connection_string"
-   ```
-4. Run the app:
+3. Run the app:
    ```bash
    cd api
    python index.py
    ```
-5. Open `http://localhost:5000` in your browser.
+4. Open `http://localhost:5000` in your browser.
+*(On local machine, the database will be saved permanently as `school.db` in the root folder).*
